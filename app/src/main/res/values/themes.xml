@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <style name="Theme.RPGManager" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#FF121214</item>
+        <item name="android:statusBarColor">#FF121214</item>
+        <item name="android:navigationBarColor">#FF121214</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+
+    <!-- 游戏页：全屏沉浸，黑底，避免加载瞬间白闪 -->
+    <style name="Theme.RPGManager.Game" parent="android:Theme.Material.NoActionBar.Fullscreen">
+        <item name="android:windowBackground">#FF000000</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowFullscreen">true</item>
+        <item name="android:windowContentOverlay">@null</item>
+    </style>
+
+</resources>

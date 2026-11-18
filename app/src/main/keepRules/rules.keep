@@ -1,0 +1,15 @@
+# Add project specific R8 rules here.
+# AGP will combine all keep rule files in src/main/keepRules to pass to R8
+#
+# For more details, see
+#   https://d.android.com/r/tools/r8/keep-rules
+
+# ---------------------------------------------------------------------------
+# WebView 注入脚本通过 window.RPGNative 调用这些方法（addJavascriptInterface
+# 是按「方法名」反射查找的）。R8 混淆会重命名方法，导致 release 包里存档读写
+# 直接失效，因此整个类连同方法名必须原样保留。
+# ---------------------------------------------------------------------------
+-keep class com.dearxuan.rpgmanager.core.NativeBridge { *; }
+-keepclassmembers class * {
+    @android.webkit.JavascriptInterface <methods>;
+}
