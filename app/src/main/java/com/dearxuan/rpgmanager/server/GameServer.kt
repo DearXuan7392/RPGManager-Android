@@ -20,14 +20,16 @@ import java.util.concurrent.Executors
 import kotlin.concurrent.thread
 
 /**
- * 本机回环 HTTP 服务：把 SAF 目录里的游戏以 http://127.0.0.1:port/g/ 的形式暴露给 WebView。
+ * 「WebView 模式」的资源服务：把 SAF 目录里的游戏以 http://127.0.0.1:port/g/ 暴露给 WebView。
  *
- * 【为什么需要它】
- * RPG Maker MV/MZ 大量使用 XMLHttpRequest 读取 data 里的 json、img 里的图片、audio 里的音频，
- * 而 WebView 直接以 file:// 打开时会被同源策略拦住；content:// 也无法作为页面源。
- * 只要给游戏一个正常的 http 源，游戏代码就完全按「网页版」的方式跑起来。
+ * 这是不启用内嵌 Node 时走的路径：游戏跑成「网页版」，没有 require/process，
+ * 存档进 IndexedDB，与桌面端不互通 —— 换来的是更轻的启动和更强的兼容性兜底
+ * （个别游戏的检测逻辑只认浏览器环境）。
  *
- * 端口固定，保证 origin 稳定 —— 否则 localStorage（MZ 的存档）会随端口变化而丢失。
+ * 资源仍然需要一个 http 源：MV/MZ 大量用 XMLHttpRequest 读 data/json、img、audio，
+ * file:// 和 content:// 都会被同源策略或解码限制挡住。
+ *
+ * 端口固定，保证 origin 稳定 —— 否则 localStorage / IndexedDB（网页版存档）会随端口变化而丢失。
  */
 class GameServer(private val context: Context, private val repo: SafRepo) {
 
@@ -35,7 +37,7 @@ class GameServer(private val context: Context, private val repo: SafRepo) {
         private const val TAG = "GameServer"
         const val PREFERRED_PORT = 18666
         private const val PORT_TRIES = 10
-        private const val INJECT_PATH = "/__rpg/inject.js"
+        private const val INJECT_PATH = "/__rpg/cheat.js"
     }
 
     @Volatile private var serverSocket: ServerSocket? = null
@@ -49,6 +51,10 @@ class GameServer(private val context: Context, private val repo: SafRepo) {
     /** 当前要服务的游戏根目录 document id */
     @Volatile
     var gameDocId: String? = null
+
+    /** 是否显示游戏内的作弊悬浮球（关掉也仍然注入脚本，虚拟按键依赖它） */
+    @Volatile
+    var cheatUiEnabled: Boolean = true
 
     @Volatile private var injectJs: ByteArray? = null
 
@@ -477,7 +483,10 @@ class GameServer(private val context: Context, private val repo: SafRepo) {
             val viewport = "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1," +
                 "maximum-scale=1,user-scalable=no,viewport-fit=cover\">"
             result = Regex("(?is)<meta\\s+[^>]*name\\s*=\\s*[\"']viewport[\"'][^>]*>").replace(result, "")
-            val snippet = viewport + "<script src=\"$INJECT_PATH\" charset=\"utf-8\" data-rpg-cheat=\"1\"></script>"
+            // 关闭作弊界面时只留一个标记，cheat.js 仍要加载（window.__rpgKey 由它提供）
+            val flags = if (cheatUiEnabled) "" else "<script>window.__RPG_CHEAT_UI__=false;</script>"
+            val snippet = viewport + flags +
+                "<script src=\"$INJECT_PATH\" charset=\"utf-8\" data-rpg-cheat=\"1\"></script>"
 
             val lower = result.lowercase()
             var insertAt = -1
@@ -504,10 +513,10 @@ class GameServer(private val context: Context, private val repo: SafRepo) {
     private fun loadInjectJs(): ByteArray {
         injectJs?.let { return it }
         val bytes = try {
-            context.assets.open("inject/inject.js").use { it.readBytes() }
+            context.assets.open("nodehost/page/cheat.js").use { it.readBytes() }
         } catch (e: Exception) {
             Log.e(TAG, "读取注入脚本失败", e)
-            "console.error('[RPG] inject.js 缺失');".toByteArray()
+            "console.error('[RPG] cheat.js 缺失');".toByteArray()
         }
         injectJs = bytes
         return bytes

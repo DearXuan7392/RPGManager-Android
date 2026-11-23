@@ -1,15 +1,15 @@
-# Add project specific R8 rules here.
-# AGP will combine all keep rule files in src/main/keepRules to pass to R8
-#
-# For more details, see
-#   https://d.android.com/r/tools/r8/keep-rules
+# ---------------------------------------------------------------------------
+# 内嵌 Node 运行时的 JNI 入口。
+# 原生库里的符号名是 Java_com_dearxuan_rpgmanager_node_NodeLauncher_xxx，
+# 类名/包名/方法名任一被混淆，System.loadLibrary 之后就再也找不到方法。
+# ---------------------------------------------------------------------------
+-keep class com.dearxuan.rpgmanager.node.NodeLauncher { *; }
 
 # ---------------------------------------------------------------------------
-# WebView 注入脚本通过 window.RPGNative 调用这些方法（addJavascriptInterface
-# 是按「方法名」反射查找的）。R8 混淆会重命名方法，导致 release 包里存档读写
-# 直接失效，因此整个类连同方法名必须原样保留。
+# 页面通过 window.RPGHost 调用这个接口（JavascriptInterface 按方法名反射查找），
+# 混淆后方法名会变，release 包里「作弊面板打开时收起虚拟按键」就会失效。
 # ---------------------------------------------------------------------------
--keep class com.dearxuan.rpgmanager.core.NativeBridge { *; }
+-keep class com.dearxuan.rpgmanager.core.PageHost { *; }
 -keepclassmembers class * {
     @android.webkit.JavascriptInterface <methods>;
 }

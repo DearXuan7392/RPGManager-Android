@@ -19,6 +19,8 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.IntrinsicSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -27,9 +29,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -65,11 +64,20 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items as lazyItems
+import androidx.compose.ui.draw.blur
+import com.dearxuan.rpgmanager.core.AppSettings
 import com.dearxuan.rpgmanager.core.CoverLoader
+import com.dearxuan.rpgmanager.core.CoverMode
+import com.dearxuan.rpgmanager.core.ListMode
+import com.dearxuan.rpgmanager.core.RuntimeMode
 import com.dearxuan.rpgmanager.core.DecryptTasks
 import com.dearxuan.rpgmanager.core.DocInfo
 import com.dearxuan.rpgmanager.core.GameEntry
 import com.dearxuan.rpgmanager.core.SafRepo
+import com.dearxuan.rpgmanager.core.StorageAccess
+import com.dearxuan.rpgmanager.node.NodeRuntime
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -85,16 +93,27 @@ private data class TaskState(val title: String, val detail: String, val fraction
 fun MenuRoute(
     repo: SafRepo,
     resumeTick: Int,
-    onPlay: (GameEntry) -> Unit
+    onPlay: (GameEntry, String) -> Unit
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val coverLoader = remember { CoverLoader(repo) }
     val tasks = remember { DecryptTasks(repo) }
+    val settings = remember { AppSettings(context) }
+
+    var runtime by remember { mutableStateOf(settings.runtime) }
+    var virtualPad by remember { mutableStateOf(settings.virtualPad) }
+    var cheatMenu by remember { mutableStateOf(settings.cheatMenu) }
+    var coverMode by remember { mutableStateOf(settings.coverMode) }
+    var listMode by remember { mutableStateOf(settings.listMode) }
+    var showSettings by remember { mutableStateOf(false) }
 
     var games by remember { mutableStateOf<List<GameEntry>>(emptyList()) }
     var scanning by remember { mutableStateOf(false) }
     var permissionOk by remember { mutableStateOf(repo.hasPermission()) }
+    var realRoot by remember { mutableStateOf(repo.realRootPath()) }
+    var allFilesOk by remember { mutableStateOf(StorageAccess.isAllFilesGranted()) }
+    var permissionDialog by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
     var task by remember { mutableStateOf<TaskState?>(null) }
     var taskJob by remember { mutableStateOf<Job?>(null) }
@@ -108,6 +127,8 @@ fun MenuRoute(
             return
         }
         permissionOk = true
+        realRoot = repo.realRootPath()
+        allFilesOk = StorageAccess.isAllFilesGranted()
         scanning = true
         scope.launch {
             val list = try {
@@ -117,6 +138,17 @@ fun MenuRoute(
             }
             games = list
             scanning = false
+
+            // 权限齐了就顺手把 Node 起来，进游戏时不用再等（启动一次要一两秒）。
+            // WebView 模式不碰 Node：省内存，也避免它占着端口。
+            val root = realRoot
+            if (runtime == RuntimeMode.NODE && root != null && StorageAccess.canReadWrite(root)) {
+                withContext(Dispatchers.IO) {
+                    if (NodeRuntime.ensureStarted(context) != 0) {
+                        NodeRuntime.setGamesRoot(root)
+                    }
+                }
+            }
         }
     }
 
@@ -131,6 +163,49 @@ fun MenuRoute(
         }
         permissionOk = true
         refresh()
+    }
+
+    // 「所有文件访问权限」设置页：回来后会走 onResume → resumeTick 变化 → refresh
+    val settingsLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { refresh() }
+
+    fun requestAllFiles() {
+        for (intent in StorageAccess.allFilesSettingsIntents(context)) {
+            try {
+                settingsLauncher.launch(intent)
+                return
+            } catch (e: Exception) {
+            }
+        }
+        message = "这个系统没有「所有文件访问权限」入口。请把游戏放到应用自己的目录，或换一台设备。"
+    }
+
+    /**
+     * Node 模式要真实路径 + 「所有文件访问权限」（内嵌 Node 直接读磁盘）；
+     * WebView 模式走 SAF，只凭已有的目录授权，不需要这些。
+     */
+    fun play(game: GameEntry) {
+        if (runtime == RuntimeMode.WEBVIEW) {
+            onPlay(game, realRoot.orEmpty())
+            return
+        }
+        val root = realRoot
+        if (root == null) {
+            message = "这个文件夹没有可用的本地路径（可能来自网盘类应用）。\n" +
+                "请选择内部存储或 SD 卡上的普通文件夹，或把运行方式改成「纯 WebView」。"
+            return
+        }
+        if (!StorageAccess.isAllFilesGranted()) {
+            permissionDialog = true
+            return
+        }
+        if (!StorageAccess.canReadWrite(root)) {
+            message = "无法读写 $root\n请在系统设置里检查文件权限。"
+            return
+        }
+        allFilesOk = true
+        onPlay(game, root)
     }
 
     fun startDecrypt(game: GameEntry, full: Boolean) {
@@ -163,48 +238,108 @@ fun MenuRoute(
         }
     }
 
-    Column(
-        Modifier
-            .fillMaxSize()
-            .windowInsetsPadding(WindowInsets.systemBars)
-    ) {
-        MenuHeader(
-            gameCount = games.size,
-            onRefresh = { refresh() },
-            onChangeFolder = { picker.launch(null) }
-        )
+    Box(Modifier.fillMaxSize()) {
+        // 设置页是全屏的，打开时不再渲染列表：既不浪费合成，也避免点击穿透到卡片
+        if (!showSettings) Column(
+            Modifier
+                .fillMaxSize()
+                .windowInsetsPadding(WindowInsets.systemBars)
+        ) {
+            MenuHeader(
+                gameCount = games.size,
+                onRefresh = { refresh() },
+                onChangeFolder = { picker.launch(null) },
+                onOpenSettings = { showSettings = true }
+            )
 
-        Box(Modifier.fillMaxSize()) {
-            when {
-                !permissionOk -> Onboarding(onPick = { picker.launch(null) })
-                scanning -> CenterLoading("正在扫描游戏…")
-                games.isEmpty() -> NoGames(onPick = { picker.launch(null) }, onRefresh = { refresh() })
-                else -> LazyVerticalGrid(
-                    columns = GridCells.Adaptive(148.dp),
-                    contentPadding = androidx.compose.foundation.layout.PaddingValues(
-                        start = 14.dp, end = 14.dp, top = 4.dp, bottom = 24.dp
-                    ),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                    modifier = Modifier.fillMaxSize()
-                ) {
-                    items(games, key = { it.docId }) { game ->
-                        GameCard(
-                            game = game,
-                            coverLoader = coverLoader,
-                            onClick = { onPlay(game) },
-                            onLongClick = { sheetGame = game }
-                        )
+            if (runtime == RuntimeMode.NODE && permissionOk && !allFilesOk) {
+                PermissionBanner(onClick = { requestAllFiles() })
+            }
+
+            Box(Modifier.fillMaxSize()) {
+                when {
+                    !permissionOk -> Onboarding(onPick = { picker.launch(null) })
+                    scanning -> CenterLoading("正在扫描游戏…")
+                    games.isEmpty() -> NoGames(
+                        onPick = { picker.launch(null) },
+                        onRefresh = { refresh() }
+                    )
+
+                    listMode == ListMode.SINGLE -> LazyColumn(
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                            start = 14.dp, end = 14.dp, top = 4.dp, bottom = 24.dp
+                        ),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.fillMaxSize()
+                    ) {
+                        lazyItems(games, key = { it.docId }) { game ->
+                            GameListRow(
+                                game = game,
+                                onClick = { play(game) },
+                                onLongClick = { sheetGame = game }
+                            )
+                        }
+                    }
+
+                    // 两两成行自己排版：同一行用 IntrinsicSize.Max 对齐高度，
+                    // 左边标题多一行时右边跟着一起长高，两张卡永远一样大。
+                    // （LazyVerticalGrid 里同一行的卡片各算各的高度，底部会对不齐。）
+                    else -> LazyColumn(
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                            start = 14.dp, end = 14.dp, top = 4.dp, bottom = 24.dp
+                        ),
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                        modifier = Modifier.fillMaxSize()
+                    ) {
+                        lazyItems(games.chunked(2), key = { row -> row.first().docId }) { row ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(IntrinsicSize.Max),
+                                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                row.forEach { game ->
+                                    GameCard(
+                                        game = game,
+                                        coverLoader = coverLoader,
+                                        coverMode = coverMode,
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .fillMaxHeight(),
+                                        onClick = { play(game) },
+                                        onLongClick = { sheetGame = game }
+                                    )
+                                }
+                                // 单数时补一个占位，最后一张卡不会被拉成整行宽
+                                if (row.size == 1) Spacer(Modifier.weight(1f))
+                            }
+                        }
                     }
                 }
             }
+        }
+
+        if (showSettings) {
+            SettingsScreen(
+                runtime = runtime,
+                onRuntime = { runtime = it; settings.runtime = it },
+                virtualPad = virtualPad,
+                onVirtualPad = { virtualPad = it; settings.virtualPad = it },
+                cheatMenu = cheatMenu,
+                onCheatMenu = { cheatMenu = it; settings.cheatMenu = it },
+                coverMode = coverMode,
+                onCoverMode = { coverMode = it; settings.coverMode = it },
+                listMode = listMode,
+                onListMode = { listMode = it; settings.listMode = it },
+                onDismiss = { showSettings = false }
+            )
         }
     }
 
     sheetGame?.let { game ->
         GameActionsSheet(
             game = game,
-            onPlay = { sheetGame = null; onPlay(game) },
+            onPlay = { sheetGame = null; play(game) },
             onDecryptImages = { sheetGame = null; startDecrypt(game, false) },
             onCloneGame = { sheetGame = null; startDecrypt(game, true) },
             onEditSaves = { sheetGame = null; saveGame = game },
@@ -215,6 +350,28 @@ fun MenuRoute(
 
     saveGame?.let { game ->
         SaveManagerDialog(repo = repo, game = game, onDismiss = { saveGame = null })
+    }
+
+    if (permissionDialog) {
+        AlertDialog(
+            onDismissRequest = { permissionDialog = false },
+            title = { Text("还需要「所有文件访问权限」") },
+            text = {
+                Text(
+                    "内嵌的 Node 需要它才能直接读取游戏文件，在设置里打开后返回即可。",
+                    fontSize = 13.sp,
+                    lineHeight = 19.sp
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { permissionDialog = false; requestAllFiles() }) {
+                    Text("去开启")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { permissionDialog = false }) { Text("以后再说") }
+            }
+        )
     }
 
     task?.let { state ->
@@ -233,12 +390,6 @@ fun MenuRoute(
                     }
                     Spacer(Modifier.height(10.dp))
                     Text(state.detail, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Spacer(Modifier.height(6.dp))
-                    Text(
-                        "写入大量文件时速度较慢，请保持屏幕常亮、不要切走应用。",
-                        fontSize = 11.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
                 }
             },
             confirmButton = {
@@ -262,7 +413,12 @@ fun MenuRoute(
 // =====================================================================
 
 @Composable
-private fun MenuHeader(gameCount: Int, onRefresh: () -> Unit, onChangeFolder: () -> Unit) {
+private fun MenuHeader(
+    gameCount: Int,
+    onRefresh: () -> Unit,
+    onChangeFolder: () -> Unit,
+    onOpenSettings: () -> Unit
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -285,6 +441,32 @@ private fun MenuHeader(gameCount: Int, onRefresh: () -> Unit, onChangeFolder: ()
         GlyphButton("⟳", onRefresh)
         Spacer(Modifier.width(6.dp))
         GlyphButton("📁", onChangeFolder)
+        Spacer(Modifier.width(6.dp))
+        GlyphButton("⚙", onOpenSettings)
+    }
+}
+
+@Composable
+private fun PermissionBanner(onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 14.dp)
+            .padding(bottom = 8.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .background(Color(0x33FFB74D))
+            .border(1.dp, Color(0x66FFB74D), RoundedCornerShape(10.dp))
+            .pointerInput(Unit) { detectTapGestures { onClick() } }
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            "还差「所有文件访问权限」，点这里开启后才能启动游戏",
+            fontSize = 12.sp,
+            color = Color(0xFFFFD08A),
+            modifier = Modifier.weight(1f)
+        )
+        Text("去开启 ›", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color(0xFFFFD08A))
     }
 }
 
@@ -339,7 +521,8 @@ private fun Onboarding(onPick: () -> Unit) {
 
         StepHint("1", "点下面的按钮，选择一个文件夹（例如 内部存储/Games）。")
         StepHint("2", "把游戏的 www 文件夹里的所有内容，放进这个文件夹下一个以游戏名命名的子文件夹里。")
-        StepHint("3", "返回本应用，游戏会自动出现在列表中，点击即可开始游玩。")
+        StepHint("3", "按提示开启「所有文件访问权限」。")
+        StepHint("4", "返回本应用，游戏会自动出现在列表中，点击即可开始游玩。")
 
         Spacer(Modifier.height(20.dp))
         Button(
@@ -416,17 +599,23 @@ private fun NoGames(onPick: () -> Unit, onRefresh: () -> Unit) {
 private fun GameCard(
     game: GameEntry,
     coverLoader: CoverLoader,
+    coverMode: CoverMode,
+    modifier: Modifier = Modifier,
     onClick: () -> Unit,
     onLongClick: () -> Unit
 ) {
-    val cover by produceState<Bitmap?>(initialValue = coverLoader.cached(game), game.docId) {
-        if (value == null) {
+    val showCover = coverMode != CoverMode.OFF
+    val cover by produceState<Bitmap?>(
+        initialValue = if (showCover) coverLoader.cached(game) else null,
+        game.docId, showCover
+    ) {
+        if (showCover && value == null) {
             value = withContext(Dispatchers.IO) { coverLoader.load(game, 480) }
         }
     }
 
     Column(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(12.dp))
             .background(MaterialTheme.colorScheme.surfaceVariant)
@@ -436,40 +625,108 @@ private fun GameCard(
             }
             .padding(8.dp)
     ) {
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .aspectRatio(16f / 9f)
-                .clip(RoundedCornerShape(8.dp))
-                .background(Color(0xFF15151B)),
-            contentAlignment = Alignment.Center
-        ) {
-            val bmp = cover
-            if (bmp != null) {
-                Image(
-                    bitmap = bmp.asImageBitmap(),
-                    contentDescription = null,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize()
-                )
-            } else {
+        if (showCover) {
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(16f / 9f)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(Color(0xFF15151B)),
+                contentAlignment = Alignment.Center
+            ) {
+                val bmp = cover
+                if (bmp != null) {
+                    Image(
+                        bitmap = bmp.asImageBitmap(),
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .then(
+                                if (coverMode == CoverMode.BLUR) Modifier.blur(12.dp)
+                                else Modifier
+                            )
+                    )
+                } else {
+                    Text(
+                        game.name.take(1),
+                        fontSize = 26.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+            }
+            Spacer(Modifier.height(6.dp))
+            Text(
+                game.name,
+                fontSize = 13.sp,
+                lineHeight = 17.sp,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+        } else {
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(16f / 9f)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(Color(0xFF1A1A22))
+                    .padding(10.dp),
+                contentAlignment = Alignment.Center
+            ) {
                 Text(
-                    game.name.take(1),
-                    fontSize = 26.sp,
+                    game.name,
+                    fontSize = 15.sp,
+                    lineHeight = 21.sp,
                     fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.primary
+                    textAlign = TextAlign.Center,
+                    maxLines = 4,
+                    overflow = TextOverflow.Ellipsis,
+                    color = MaterialTheme.colorScheme.onSurface
                 )
             }
         }
-        Spacer(Modifier.height(6.dp))
-        Text(
-            game.name,
-            fontSize = 13.sp,
-            lineHeight = 17.sp,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-            color = MaterialTheme.colorScheme.onSurface
-        )
+    }
+}
+
+@Composable
+private fun GameListRow(
+    game: GameEntry,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(10.dp))
+            .pointerInput(game.docId) {
+                detectTapGestures(onTap = { onClick() }, onLongPress = { onLongClick() })
+            }
+            .padding(horizontal = 14.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(
+                game.name,
+                fontSize = 15.sp,
+                lineHeight = 20.sp,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            if (game.location != game.name) {
+                Text(
+                    game.location,
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 2.dp)
+                )
+            }
+        }
+        Text("›", fontSize = 18.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 
@@ -557,7 +814,7 @@ private fun SaveManagerDialog(repo: SafRepo, game: GameEntry, onDismiss: () -> U
                 when {
                     list == null -> Text("读取中…", fontSize = 13.sp)
                     list.isEmpty() -> Text(
-                        "还没有存档。进游戏存一次档后，这里会出现 save/*.rpgsave。",
+                        "还没有存档。",
                         fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -638,7 +895,6 @@ private fun openFolder(context: Context, repo: SafRepo, game: GameEntry) {
             context.startActivity(intent)
             return
         } catch (e: Exception) {
-            // 试下一个
         }
     }
     Toast.makeText(context, "系统没有可打开该目录的文件管理器", Toast.LENGTH_SHORT).show()

@@ -40,10 +40,12 @@ class MainActivity : ComponentActivity() {
                     MenuRoute(
                         repo = repo,
                         resumeTick = resumeTick.intValue,
-                        onPlay = { game ->
+                        onPlay = { game, root ->
                             startActivity(
                                 Intent(this, GameActivity::class.java).apply {
                                     putExtra(GameActivity.EXTRA_NAME, game.name)
+                                    putExtra(GameActivity.EXTRA_LOCATION, game.location)
+                                    putExtra(GameActivity.EXTRA_ROOT, root)
                                     putExtra(GameActivity.EXTRA_DOC_ID, game.docId)
                                 }
                             )

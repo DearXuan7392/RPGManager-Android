@@ -1,23 +1,25 @@
 /**
- * inject.js —— 注入到游戏页面内部的载荷（安卓版）
+ * cheat.js —— 注入到游戏页面内部的载荷（安卓版）
  *
- * 由本地 HTTP 服务在 index.html 的 <head> 顶部插入 <script> 加载，
- * 因此执行时机早于游戏自身的 rpg_*.js / main.js。
+ * 由内嵌 Node 的 HTTP 服务在 index.html 的 <head> 顶部插入 <script> 加载，
+ * 执行时机早于游戏自身的 rpg_*.js / main.js。
  *
  * 与桌面端 menu/cheat.js 的差异：
  *   1. 界面按手机触屏重做尺寸（桌面端用鼠标，尺寸偏小）；
  *   2. 提供 window.__rpgKey(code, down)，供安卓原生虚拟按键派发键盘事件；
- *   3. 通过 window.RPGNative（JavascriptInterface）把 MV 的存档从 localStorage
- *      改回游戏目录下的 save/*.rpgsave，与桌面端存档文件完全一致；
- *   4. 不伪造 require / process 的 nwjs 身份，游戏仍以为自己跑在浏览器里，
- *      避免触发大多数国产游戏的「开发环境检测」自杀逻辑。
+ *   3. require / process / nw 由 shim.js 提供（真·Node 环境），这里不再伪造；
+ *   4. 把 MV 的加密标记锁成 false，资源统一由服务端解密后以明文下发。
  */
 (function () {
     'use strict';
 
-    var VERSION = 6;
+    var VERSION = 9;
     if (window.__RPGCHEAT_READY === VERSION) return;
     window.__RPGCHEAT_READY = VERSION;
+
+    // 设置里可以关掉作弊界面：关掉后仍然提供 window.__rpgKey 等底层能力，
+    // 只是不再挂悬浮球和面板（虚拟按键依赖本脚本，不能整个不注入）。
+    var UI_ENABLED = window.__RPG_CHEAT_UI__ !== false;
 
     var KEY_NAMES = {
         9: 'Tab', 13: 'Enter', 16: 'Shift', 17: 'Control', 18: 'Alt', 27: 'Escape',
@@ -25,7 +27,8 @@
         88: 'x', 90: 'z'
     };
     var CODE_NAMES = {
-        9: 'Tab', 13: 'Enter', 16: 'ShiftLeft', 27: 'Escape', 32: 'Space',
+        9: 'Tab', 13: 'Enter', 16: 'ShiftLeft', 17: 'ControlLeft', 18: 'AltLeft',
+        27: 'Escape', 32: 'Space',
         37: 'ArrowLeft', 38: 'ArrowUp', 39: 'ArrowRight', 40: 'ArrowDown',
         88: 'KeyX', 90: 'KeyZ'
     };
@@ -38,33 +41,7 @@
     // 一、反检测 / 环境补丁（必须跑在游戏页面里，且越早越好）
     // =====================================================================
 
-    // 1. 阉割 process.exit：没有 require，isNwjs() 仍为 false，游戏不会走 Node 分支，
-    //    但部分游戏的检测代码会直接调用 process.exit()，这里让它变成空操作。
-    //    注意：必须给出 mainModule.filename —— MZ 的 main.js 会读
-    //    process.mainModule.filename 判断 Gatekeeper 路径随机化，缺字段会直接抛异常打死启动。
-    try {
-        if (!window.process) {
-            window.process = {
-                platform: 'android',
-                type: 'renderer',
-                versions: {},          // 故意不含 nw：Utils.isNwjs() 依旧为 false
-                env: {},
-                argv: [],
-                execPath: '/g/nw.exe',
-                pid: 1,
-                cwd: function () { return '/g'; },
-                exit: function () { },
-                on: function () { },
-                once: function () { },
-                nextTick: function (fn) { setTimeout(fn, 0); },
-                mainModule: { filename: '/g/index.html', paths: [] }
-            };
-        } else if (typeof window.process.exit === 'function') {
-            window.process.exit = function () { };
-        }
-    } catch (e) { }
-
-    // 2. 隐藏滚动条（只改外观）
+    // 隐藏滚动条（只改外观）
     try {
         var scrollStyle = document.createElement('style');
         scrollStyle.setAttribute('data-rpg-cheat-style', '1');
@@ -77,7 +54,7 @@
         (document.head || document.documentElement).appendChild(scrollStyle);
     } catch (e) { }
 
-    // 3. 屏蔽页面右键菜单（手机上长按会弹出系统菜单，打断游戏）
+    // 屏蔽页面右键菜单（手机上长按会弹出系统菜单，打断游戏）
     try {
         document.addEventListener('contextmenu', function (e) {
             e.preventDefault();
@@ -85,7 +62,7 @@
         }, true);
     } catch (e) { }
 
-    // 4. 错误不弹窗，只打印（带堆栈，方便定位是哪个插件出问题）
+    // 错误不弹窗，只打印（带堆栈，方便定位是哪个插件出问题）
     try {
         window.addEventListener('error', function (e) {
             var msg = (e && e.message) || '';
@@ -127,11 +104,12 @@
     };
 
     // =====================================================================
-    // 三、存档接管：把 MV 的 localStorage 存档改写到游戏目录 save/ 下
-    //     （与桌面端完全一致：fileN.rpgsave / global.rpgsave / config.rpgsave）
+    // 三、资源后缀补丁
+    //
+    // 存档不用在这里接管：require('fs') 由 shim.js 接到了内嵌 Node 上，
+    // 引擎的 isNwjs() 为 true，自己就会把 fileN.rpgsave 写进游戏目录的 save/。
     // =====================================================================
 
-    var storagePatchTried = false;
     var decrypterPatched = false;
     var audioExtPatched = false;
 
@@ -185,101 +163,6 @@
         };
     }
 
-    function applyStoragePatch() {
-        if (storagePatchTried) return;
-        var N = window.RPGNative;
-        var SM = window.StorageManager;
-        if (!N || !SM) return;
-        if (!window.Utils || !window.Utils.RPGMAKER_NAME) return;
-        if (window.Utils.RPGMAKER_NAME !== 'MV') {
-            // MZ 存档是 zip 格式，保持 Web 端 IndexedDB 实现
-            storagePatchTried = true;
-            return;
-        }
-        if (SM.__rpgSaveBridge) return;
-        if (!window.LZString || typeof window.LZString.compressToBase64 !== 'function') return;
-
-        // 桥自检：拿不到读写能力就什么都不改，游戏继续用 localStorage
-        try {
-            var probe = 'save/.rpg_bridge_test';
-            if (!N.writeText(probe, '1')) return;
-            var ok = N.readText(probe) === '1';
-            N.removeFile(probe);
-            if (!ok) return;
-        } catch (e) {
-            return;
-        }
-
-        function fileName(id) {
-            if (typeof id === 'string') return id;
-            if (id < 0) return 'config.rpgsave';
-            if (id === 0) return 'global.rpgsave';
-            return 'file' + id + '.rpgsave';
-        }
-
-        function pathOf(id) { return 'save/' + fileName(id); }
-
-        storagePatchTried = true;
-
-        SM.__rpgSaveBridge = true;
-        SM.isLocalMode = function () { return true; };
-        SM.localFileDirectoryPath = function () { return '/save/'; };
-        SM.localFilePath = function (id) { return '/save/' + fileName(id); };
-
-        SM.saveToLocalFile = function (id, json) {
-            try {
-                N.writeText(pathOf(id), window.LZString.compressToBase64(json));
-            } catch (e) { console.error('[RPG] 写存档失败', e); }
-        };
-
-        SM.loadFromLocalFile = function (id) {
-            try {
-                var text = N.readText(pathOf(id));
-                if (text === null || text === undefined || text === '') return null;
-                return window.LZString.decompressFromBase64(text);
-            } catch (e) {
-                console.error('[RPG] 读存档失败', e);
-                return null;
-            }
-        };
-
-        SM.localFileExists = function (id) { return !!N.exists(pathOf(id)); };
-        SM.removeLocalFile = function (id) { N.removeFile(pathOf(id)); };
-
-        SM.backup = function (id) {
-            if (!this.exists(id)) return;
-            try {
-                var data = this.loadFromLocalFile(id);
-                N.writeText(pathOf(id) + '.bak', window.LZString.compressToBase64(data));
-            } catch (e) { console.error('[RPG] 备份存档失败', e); }
-        };
-
-        SM.loadFromLocalBackupFile = function (id) {
-            try {
-                var text = N.readText(pathOf(id) + '.bak');
-                if (!text) return null;
-                return window.LZString.decompressFromBase64(text);
-            } catch (e) { return null; }
-        };
-
-        SM.localFileBackupExists = function (id) { return !!N.exists(pathOf(id) + '.bak'); };
-
-        SM.cleanBackup = function (id) {
-            if (this.localFileBackupExists(id)) N.removeFile(pathOf(id) + '.bak');
-        };
-
-        SM.restoreBackup = function (id) {
-            if (!this.localFileBackupExists(id)) return;
-            try {
-                var data = this.loadFromLocalBackupFile(id);
-                N.writeText(pathOf(id), window.LZString.compressToBase64(data));
-                N.removeFile(pathOf(id) + '.bak');
-            } catch (e) { console.error('[RPG] 恢复备份失败', e); }
-        };
-
-        report('存档已接管：save/*.rpgsave（游戏目录内）');
-    }
-
     // 尽早打补丁：引擎各文件一加载完就接管，这里用高频轮询探测（补丁本身幂等）
     (function watchEngine() {
         var deadline = Date.now() + 20000;
@@ -288,8 +171,7 @@
             attempts++;
             patchAssetDecryption();
             patchAudioExt();
-            applyStoragePatch();
-            var done = decrypterPatched && audioExtPatched && storagePatchTried;
+            var done = decrypterPatched && audioExtPatched;
             if (done || Date.now() > deadline) return;
             setTimeout(tick, attempts < 60 ? 16 : 250);
         }
@@ -299,11 +181,7 @@
     document.addEventListener('DOMContentLoaded', function () {
         patchAssetDecryption();
         patchAudioExt();
-        applyStoragePatch();
     });
-
-    // 调试用：可在控制台/测试页手动触发存档接管
-    window.__rpgPatchStorage = applyStoragePatch;
 
     // =====================================================================
     // 四、数值修改核心
@@ -611,6 +489,9 @@
     var UI_ID = 'rpg-cheat-host';
     var BALL = 46;        // px（页面 CSS 像素 ≈ dp，因为注入了 width=device-width 的 viewport）
     var PANEL_W = 300;
+    // 悬浮球由原生层（Compose）绘制：只有原生 View 才能永远盖在虚拟按键之上，
+    // 页面里这只球隐藏起来，只用来告诉面板该往哪儿展开。
+    var PAGE_BALL_HIDDEN = true;
 
     var ui = {
         host: null, btn: null, panel: null, tip: null, radarBtn: null,
@@ -639,6 +520,8 @@
 
         ui.panel.style.left = left + 'px';
         ui.panel.style.top = top + 'px';
+        // 屏幕矮的时候让面板自己滚动，别把底部按钮裁掉
+        ui.panel.style.maxHeight = Math.max(180, window.innerHeight - top - 8) + 'px';
     }
 
     function setTip(msg, isError) {
@@ -654,9 +537,20 @@
         ui.loseBtn.disabled = !on;
     }
 
+    /** 面板打开时让原生层收起虚拟按键：按键画在 WebView 之上，会盖住面板下半部分 */
+    function notifyHost(open) {
+        try {
+            var host = window.RPGHost;
+            if (host && typeof host.setCheatPanelOpen === 'function') {
+                host.setCheatPanelOpen(!!open);
+            }
+        } catch (e) { }
+    }
+
     function togglePanel(force) {
         if (!ui.panel) return;
         ui.open = (typeof force === 'boolean') ? force : !ui.open;
+        notifyHost(ui.open);
         ui.panel.style.display = ui.open ? 'block' : 'none';
         ui.btn.classList.toggle('active', ui.open);
 
@@ -679,17 +573,29 @@
     function buildUI() {
         if (document.getElementById(UI_ID) || !document.body) return;
 
+        // 游戏画布是 z-index:1 的定位元素，而本容器在 shadow DOM 里，
+        // :host 规则的优先级低于文档规则，容易被画布压住。这里补一条文档级 !important 规则，
+        // 把容器钉死在最上层（2147483647 是 z-index 上限）。
+        try {
+            if (!document.getElementById('rpg-cheat-style')) {
+                var zfix = document.createElement('style');
+                zfix.id = 'rpg-cheat-style';
+                zfix.textContent = '#' + UI_ID + '{position:fixed !important;z-index:2147483647 !important;}';
+                (document.head || document.documentElement).appendChild(zfix);
+            }
+        } catch (e) { }
+
         var host = document.createElement('div');
         host.id = UI_ID;
         host.style.cssText = 'position:fixed;width:' + BALL + 'px;height:' + BALL + 'px;' +
-            'z-index:2147483000;left:0;top:0;';
+            'z-index:2147483647;left:0;top:0;';
 
         var root = host.attachShadow({ mode: 'open' });
         var pw = Math.min(PANEL_W, Math.round(window.innerWidth * 0.78));
 
         root.innerHTML = [
             '<style>',
-            ':host{all:initial;}',
+            ':host{all:initial;position:fixed;z-index:2147483647;}',
             '.ball{width:' + BALL + 'px;height:' + BALL + 'px;border-radius:50%;box-sizing:border-box;',
             'background:radial-gradient(circle at 32% 28%,#7fdcff,#0f7fbf 72%);',
             'box-shadow:0 6px 18px rgba(0,0,0,.45),inset 0 0 0 1px rgba(255,255,255,.4);',
@@ -700,7 +606,7 @@
             '.ball.dragging{transform:scale(1.08);opacity:1;}',
             '.panel{position:fixed;display:none;width:' + pw + 'px;box-sizing:border-box;',
             'max-height:82vh;overflow-y:auto;-webkit-overflow-scrolling:touch;',
-            'background:rgba(24,24,31,.97);border:1px solid #4fc3f7;border-radius:12px;',
+            'background:#18181f;border:1px solid #4fc3f7;border-radius:12px;',
             'padding:12px;color:#e9e9f2;font:13px/1.5 sans-serif;',
             'box-shadow:0 16px 36px rgba(0,0,0,.6);}',
             '.head{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;}',
@@ -745,10 +651,12 @@
             '</div>'
         ].join('');
 
-        document.body.appendChild(host);
+        // 挂到 <html> 下：body 上若有 transform/filter 会形成新的层叠上下文，把容器关进去
+        (document.documentElement || document.body).appendChild(host);
 
         ui.host = host;
         ui.btn = root.getElementById('ball');
+        if (ui.btn && PAGE_BALL_HIDDEN) ui.btn.style.display = 'none';
         ui.panel = root.getElementById('panel');
         ui.tip = root.getElementById('tip');
         ui.radarBtn = root.getElementById('radar');
@@ -893,8 +801,18 @@
         });
     }
 
+    /** 原生悬浮球每帧/每次点击前把位置（CSS px）同步过来，面板据此贴边展开 */
+    window.__rpgSetAnchor = function (x, y) {
+        if (typeof x === 'number' && typeof y === 'number' &&
+            isFinite(x) && isFinite(y)) {
+            placeBall(x - BALL / 2, y - BALL / 2);
+        }
+    };
+
     // 原生侧调用：打开 / 关闭作弊面板
-    window.__rpgOpenCheat = function () {        if (!ui.panel) buildUI();
+    window.__rpgOpenCheat = function () {
+        if (!UI_ENABLED) return false;
+        if (!ui.panel) buildUI();
         togglePanel(true);
         return !!ui.panel;
     };
@@ -905,6 +823,7 @@
     };
 
     function mountWhenBodyReady() {
+        if (!UI_ENABLED) return;
         if (document.body) buildUI();
         else document.addEventListener('DOMContentLoaded', buildUI, { once: true });
     }

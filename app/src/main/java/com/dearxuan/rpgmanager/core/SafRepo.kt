@@ -99,8 +99,10 @@ class SafRepo(private val context: Context) {
         listingCache.clear()
     }
 
-    /** 用户选定目录自身的 document id */
     fun rootDocId(): String? = treeUri?.let { DocumentsContract.getTreeDocumentId(it) }
+
+    /** 用户选定目录对应的真实路径（供内嵌 Node 使用；网盘类 provider 会返回 null） */
+    fun realRootPath(): String? = treeUri?.let { StorageAccess.realPathOf(it) }
 
     fun documentUri(docId: String): Uri? =
         treeUri?.let { DocumentsContract.buildDocumentUriUsingTree(it, docId) }

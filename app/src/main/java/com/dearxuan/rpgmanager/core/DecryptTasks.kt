@@ -71,7 +71,6 @@ class DecryptTasks(private val repo: SafRepo) {
         else -> "application/octet-stream"
     }
 
-    /** 只解密图片资产 */
     suspend fun decryptImages(game: GameEntry, onProgress: (Progress) -> Unit): String {
         val imgDir = repo.child(game.docId, "img")?.takeIf { it.isDir }
             ?: return "未找到该游戏的 img 资源文件夹"
@@ -127,7 +126,6 @@ class DecryptTasks(private val repo: SafRepo) {
         else "解密结束，${files.size - failed} 个成功，$failed 个失败"
     }
 
-    /** 克隆完整解密副本 */
     suspend fun cloneDecryptedGame(
         game: GameEntry,
         gamesRootDocId: String,

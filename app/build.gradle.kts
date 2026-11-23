@@ -13,10 +13,24 @@ val keystoreProps = Properties().apply {
 }
 val hasReleaseKeystore = keystorePropsFile.isFile
 
+// 把 git submodule 里的公共核心复制进 assets，供内嵌 Node 直接 require('./core')
+val coreAssetsRoot = layout.buildDirectory.dir("generated/core-assets")
+val copySharedCore = tasks.register<Copy>("copySharedCore") {
+    from(rootProject.file("core"))
+    include("index.js", "package.json")
+    into(coreAssetsRoot.map { it.dir("nodehost/core") })
+}
+
 android {
     namespace = "com.dearxuan.rpgmanager"
     compileSdk {
         version = release(37)
+    }
+
+    sourceSets {
+        getByName("main") {
+            assets.srcDir(coreAssetsRoot.get().asFile)
+        }
     }
 
     defaultConfig {
@@ -27,6 +41,18 @@ android {
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        // 内嵌的 Node 运行时（libnode.so）目前只提供 arm64-v8a 的预编译包
+        ndk {
+            abiFilters += listOf("arm64-v8a")
+        }
+    }
+
+    packaging {
+        jniLibs {
+            // libnode.so 有 48MB，放在 APK 里直接映射而不解压，省一份磁盘占用
+            useLegacyPackaging = false
+        }
     }
 
     signingConfigs {
@@ -58,6 +84,10 @@ android {
     buildFeatures {
         compose = true
     }
+}
+
+tasks.named("preBuild") {
+    dependsOn(copySharedCore)
 }
 
 dependencies {
