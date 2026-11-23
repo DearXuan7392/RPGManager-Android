@@ -20,9 +20,26 @@ const mimeOf = core.mimeOf;
 const altExtensions = core.altExtensions;
 
 const PAGE_ALIASES = {
-    '/__rpg/page/shim.js': 'shim.js',
-    '/__rpg/page/cheat.js': 'cheat.js'
+    '/__rpg/page/shim.js': 'shim.js'
 };
+
+let cachedCheatScript = null;
+/** 作弊载荷优先取 Core；旧版解包资源没有新 API 时回退到 page/ 下的旧文件 */
+function cheatScriptFile() {
+    if (cachedCheatScript) return cachedCheatScript;
+    try {
+        const p = core.cheatScriptPath('android');
+        if (statOrNull(p)) {
+            cachedCheatScript = p;
+            return p;
+        }
+    } catch (e) { }
+    const legacy = path.join(pageDir, 'cheat.js');
+    cachedCheatScript = statOrNull(legacy)
+        ? legacy
+        : path.join(__dirname, 'core', 'cheat', 'android.js');
+    return cachedCheatScript;
+}
 
 let cfg = null;
 let gamesRoot = null;
@@ -80,6 +97,10 @@ function handle(req, res) {
             pid: process.pid,
             gamesRoot: gamesRoot
         });
+        return;
+    }
+    if (pathname === '/__rpg/page/cheat.js') {
+        servePageScript(res, cheatScriptFile());
         return;
     }
     if (PAGE_ALIASES[pathname]) {
@@ -328,6 +349,19 @@ function cacheDecrypted(full, stat, mime, buf) {
     }
 }
 
+function errText(e) {
+    if (!e) return '';
+    return (e.code ? e.code + ' ' : '') + (e.message || String(e));
+}
+
+/** 异步读取失败时再同步读一次，并把错误码写进日志，便于定位权限/路径问题 */
+function readFileWithFallback(full) {
+    return fs.promises.readFile(full).catch(e => {
+        log('[服务] 异步读取失败 ' + full + ': ' + errText(e));
+        return fs.readFileSync(full);
+    });
+}
+
 function serveDecrypted(req, res, full, stat, head) {
     const etag = etagOf(stat);
     if (isNotModified(req, etag)) {
@@ -347,9 +381,9 @@ function serveDecrypted(req, res, full, stat, head) {
         return;
     }
 
-    fs.promises.readFile(full).then(data => {
+    readFileWithFallback(full).then(data => {
         const ext = path.extname(full).toLowerCase();
-        const isAudio = crypto.AUDIO_EXTS.indexOf(ext) >= 0;
+        const isAudio = crypto.ENCRYPTED_AUDIO_EXTS.indexOf(ext) >= 0;
         const key = encryptionKeyForFile(full);
         let out;
         try {
@@ -368,7 +402,7 @@ function serveDecrypted(req, res, full, stat, head) {
         });
         if (!head) res.end(out); else res.end();
     }).catch(e => {
-        log('[服务] 读取加密资源失败 ' + full + ': ' + e);
+        log('[服务] 读取加密资源失败 ' + full + ': ' + errText(e));
         try { sendText(res, 500, 'Read Error'); } catch (ignored) { }
     });
 }
@@ -471,11 +505,11 @@ function handleRootChange(req, res) {
     });
 }
 
-function servePageScript(res, name) {
-    const file = path.join(pageDir, name);
+function servePageScript(res, fileOrName) {
+    const file = path.isAbsolute(fileOrName) ? fileOrName : path.join(pageDir, fileOrName);
     const stat = statOrNull(file);
     if (!stat) {
-        sendText(res, 404, 'missing ' + name);
+        sendText(res, 404, 'missing ' + fileOrName);
         return;
     }
     fs.promises.readFile(file).then(data => {

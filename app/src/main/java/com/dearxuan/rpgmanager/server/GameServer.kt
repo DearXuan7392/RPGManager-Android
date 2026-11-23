@@ -35,8 +35,10 @@ class GameServer(private val context: Context, private val repo: SafRepo) {
 
     companion object {
         private const val TAG = "GameServer"
+        // 网页版存档按 origin（协议+主机+端口）隔离，端口必须固定。
+        // 18666 专门留给本模式；内嵌 Node 从 18667 起，见 NodeRuntime。
         const val PREFERRED_PORT = 18666
-        private const val PORT_TRIES = 10
+        private const val PORT_TRIES = 1
         private const val INJECT_PATH = "/__rpg/cheat.js"
     }
 
@@ -513,7 +515,8 @@ class GameServer(private val context: Context, private val repo: SafRepo) {
     private fun loadInjectJs(): ByteArray {
         injectJs?.let { return it }
         val bytes = try {
-            context.assets.open("nodehost/page/cheat.js").use { it.readBytes() }
+            // 作弊载荷来自 Core 子模块，构建时由 copySharedCore 拷进 assets
+            context.assets.open("nodehost/core/cheat/android.js").use { it.readBytes() }
         } catch (e: Exception) {
             Log.e(TAG, "读取注入脚本失败", e)
             "console.error('[RPG] cheat.js 缺失');".toByteArray()

@@ -25,10 +25,14 @@ import kotlin.concurrent.thread
 object NodeRuntime {
 
     private const val TAG = "NodeRuntime"
-    private const val PREFERRED_PORT = 18666
+    // 18666 固定留给纯 WebView 模式：网页版存档绑定 origin（含端口），
+    // 不能因为内嵌 Node 占用而被挤到别的端口，否则玩家会看到“存档丢失”。
+    private const val PREFERRED_PORT = 18667
     private const val PORT_TRIES = 12
     private const val READY_TIMEOUT_MS = 25_000L
     private const val ASSET_DIR = "nodehost"
+    // nodehost 脚本内容变化后 +1，确保老解包目录被替换（作弊载荷已改从 Core 读取）
+    private const val ASSET_STAMP_VERSION = 4
 
     @Volatile private var threadStarted = false
     @Volatile private var port = 0
@@ -194,7 +198,7 @@ object NodeRuntime {
         val stamp = File(root, ".stamp")
         val want = try {
             val info = context.packageManager.getPackageInfo(context.packageName, 0)
-            "${info.versionCode}-${info.lastUpdateTime}"
+            "$ASSET_STAMP_VERSION-${info.versionCode}-${info.lastUpdateTime}"
         } catch (e: Exception) {
             "0"
         }

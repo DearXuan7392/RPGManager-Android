@@ -13,11 +13,11 @@ val keystoreProps = Properties().apply {
 }
 val hasReleaseKeystore = keystorePropsFile.isFile
 
-// 把 git submodule 里的公共核心复制进 assets，供内嵌 Node 直接 require('./core')
+// 把 git submodule 里的公共核心（含 cheat/ 作弊载荷）复制进 assets，供内嵌 Node 直接 require('./core')
 val coreAssetsRoot = layout.buildDirectory.dir("generated/core-assets")
 val copySharedCore = tasks.register<Copy>("copySharedCore") {
     from(rootProject.file("core"))
-    include("index.js", "package.json")
+    include("index.js", "package.json", "cheat/*.js")
     into(coreAssetsRoot.map { it.dir("nodehost/core") })
 }
 
