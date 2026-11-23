@@ -11,6 +11,9 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -97,7 +100,7 @@ fun MenuRoute(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val coverLoader = remember { CoverLoader(repo) }
+    val coverLoader = remember { CoverLoader(context, repo) }
     val tasks = remember { DecryptTasks(repo) }
     val settings = remember { AppSettings(context) }
 
@@ -109,6 +112,7 @@ fun MenuRoute(
     var showSettings by remember { mutableStateOf(false) }
 
     var games by remember { mutableStateOf<List<GameEntry>>(emptyList()) }
+    var coverEpoch by remember { mutableStateOf(0) }
     var scanning by remember { mutableStateOf(false) }
     var permissionOk by remember { mutableStateOf(repo.hasPermission()) }
     var realRoot by remember { mutableStateOf(repo.realRootPath()) }
@@ -120,7 +124,7 @@ fun MenuRoute(
     var sheetGame by remember { mutableStateOf<GameEntry?>(null) }
     var saveGame by remember { mutableStateOf<GameEntry?>(null) }
 
-    fun refresh() {
+    fun refresh(forceCovers: Boolean = false) {
         if (!repo.hasPermission()) {
             permissionOk = false
             scanning = false
@@ -130,14 +134,23 @@ fun MenuRoute(
         realRoot = repo.realRootPath()
         allFilesOk = StorageAccess.isAllFilesGranted()
         scanning = true
+
         scope.launch {
+            // 清缓存、扫描、清理都放 IO：刷新按钮点下去先让列表尽快回来
+            if (forceCovers) {
+                withContext(Dispatchers.IO) { coverLoader.clear() }
+            }
             val list = try {
                 withContext(Dispatchers.IO) { repo.scanGames() }
             } catch (e: Exception) {
                 emptyList()
             }
+            if (forceCovers) coverEpoch++
             games = list
             scanning = false
+
+            // 列表已经显示，封面交给各张卡片在后台按需解码（慢的一步不挡列表）
+            withContext(Dispatchers.IO) { coverLoader.prune(list) }
 
             // 权限齐了就顺手把 Node 起来，进游戏时不用再等（启动一次要一两秒）。
             // WebView 模式不碰 Node：省内存，也避免它占着端口。
@@ -247,8 +260,15 @@ fun MenuRoute(
         ) {
             MenuHeader(
                 gameCount = games.size,
-                onRefresh = { refresh() },
-                onChangeFolder = { picker.launch(null) },
+                onRefresh = { refresh(forceCovers = true) },
+                onChangeFolder = {
+                    val root = repo.rootDocId()
+                    if (repo.hasPermission() && root != null) {
+                        openDocFolder(context, repo, root)
+                    } else {
+                        picker.launch(null)
+                    }
+                },
                 onOpenSettings = { showSettings = true }
             )
 
@@ -262,7 +282,7 @@ fun MenuRoute(
                     scanning -> CenterLoading("正在扫描游戏…")
                     games.isEmpty() -> NoGames(
                         onPick = { picker.launch(null) },
-                        onRefresh = { refresh() }
+                        onRefresh = { refresh(forceCovers = true) }
                     )
 
                     listMode == ListMode.SINGLE -> LazyColumn(
@@ -303,6 +323,7 @@ fun MenuRoute(
                                         game = game,
                                         coverLoader = coverLoader,
                                         coverMode = coverMode,
+                                        coverEpoch = coverEpoch,
                                         modifier = Modifier
                                             .weight(1f)
                                             .fillMaxHeight(),
@@ -472,16 +493,29 @@ private fun PermissionBanner(onClick: () -> Unit) {
 
 @Composable
 private fun GlyphButton(text: String, onClick: () -> Unit) {
+    // 保持原来的 40dp 尺寸，按下时只把底色换成主色，不做缩放/涟漪
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    val bg = if (pressed) MaterialTheme.colorScheme.primary
+    else MaterialTheme.colorScheme.surfaceVariant
+    val fg = if (pressed) Color.White else MaterialTheme.colorScheme.onSurface
+    val borderColor = if (pressed) MaterialTheme.colorScheme.primary
+    else MaterialTheme.colorScheme.outline
+
     Box(
         modifier = Modifier
             .size(40.dp)
             .clip(RoundedCornerShape(10.dp))
-            .background(MaterialTheme.colorScheme.surfaceVariant)
-            .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(10.dp))
-            .pointerInput(text) { detectTapGestures { onClick() } },
+            .background(bg)
+            .border(1.dp, borderColor, RoundedCornerShape(10.dp))
+            .clickable(
+                interactionSource = interaction,
+                indication = null,
+                onClick = onClick
+            ),
         contentAlignment = Alignment.Center
     ) {
-        Text(text, color = MaterialTheme.colorScheme.onSurface, fontSize = 16.sp)
+        Text(text, color = fg, fontSize = 16.sp)
     }
 }
 
@@ -600,6 +634,7 @@ private fun GameCard(
     game: GameEntry,
     coverLoader: CoverLoader,
     coverMode: CoverMode,
+    coverEpoch: Int,
     modifier: Modifier = Modifier,
     onClick: () -> Unit,
     onLongClick: () -> Unit
@@ -607,7 +642,7 @@ private fun GameCard(
     val showCover = coverMode != CoverMode.OFF
     val cover by produceState<Bitmap?>(
         initialValue = if (showCover) coverLoader.cached(game) else null,
-        game.docId, showCover
+        game.docId, showCover, coverEpoch
     ) {
         if (showCover && value == null) {
             value = withContext(Dispatchers.IO) { coverLoader.load(game, 480) }
@@ -879,7 +914,12 @@ private fun formatTime(millis: Long): String =
 
 /** 尽量用系统文件管理器打开游戏目录（部分 ROM 不支持，失败就提示） */
 private fun openFolder(context: Context, repo: SafRepo, game: GameEntry) {
-    val uri: Uri = repo.documentUri(game.docId) ?: return
+    openDocFolder(context, repo, game.docId)
+}
+
+/** 打开任意 SAF 文档目录；未传 docId 时由调用方负责先选文件夹 */
+private fun openDocFolder(context: Context, repo: SafRepo, docId: String) {
+    val uri: Uri = repo.documentUri(docId) ?: return
     val candidates = listOf(
         Intent(Intent.ACTION_VIEW).apply {
             setDataAndType(uri, DocumentsContract.Document.MIME_TYPE_DIR)

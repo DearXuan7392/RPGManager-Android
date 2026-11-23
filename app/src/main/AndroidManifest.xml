@@ -24,8 +24,10 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.RPGManager">
+        <!-- 旋转不重建 Activity：游戏列表与已解码封面留在内存里，不必重新扫描/加载 -->
         <activity
             android:name=".MainActivity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode|density|fontScale|navigation"
             android:exported="true"
             android:label="@string/app_name"
             android:theme="@style/Theme.RPGManager"

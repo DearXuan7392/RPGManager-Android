@@ -1,6 +1,9 @@
 package com.dearxuan.rpgmanager
 
 import android.annotation.SuppressLint
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.net.Uri
 import android.os.Bundle
 import android.util.Log
@@ -15,7 +18,9 @@ import android.webkit.WebViewClient
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -67,10 +72,12 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.zIndex
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import com.dearxuan.rpgmanager.core.AppSettings
+import com.dearxuan.rpgmanager.core.LogExporter
 import com.dearxuan.rpgmanager.core.PageHost
 import com.dearxuan.rpgmanager.core.RuntimeMode
 import com.dearxuan.rpgmanager.core.SafRepo
@@ -84,6 +91,9 @@ import com.dearxuan.rpgmanager.ui.theme.RPGManagerTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /**
  * 游戏页：WebView 显示游戏，其上叠加虚拟按键。
@@ -330,6 +340,23 @@ private fun GameScreen(
 
     val webHolder = remember { WebViewHolder() }
     val scope = rememberCoroutineScope()
+    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+    val logExportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocumentTree()
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        scope.launch {
+            val text = withContext(Dispatchers.IO) { NodeRuntime.readLog(context) }
+            val name = "node-runtime-" +
+                SimpleDateFormat("yyyyMMdd-HHmmss", Locale.getDefault()).format(Date()) + ".log"
+            val ok = withContext(Dispatchers.IO) { LogExporter.export(context, uri, name, text) }
+            Toast.makeText(
+                context,
+                if (ok) "日志已导出到所选文件夹（含 .nomedia）" else "日志导出失败",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
+    }
 
     fun sendKey(code: Int, down: Boolean) {
         webHolder.view?.evaluateJavascript("window.__rpgKey&&window.__rpgKey($code,$down);", null)
@@ -446,6 +473,7 @@ private fun GameScreen(
 
                 Box(
                     modifier = Modifier
+                        .zIndex(10f)
                         .offset { IntOffset(pos.x.roundToInt(), pos.y.roundToInt()) }
                         .size(CHEAT_BALL_DP.dp)
                         .clip(CircleShape)
@@ -527,7 +555,18 @@ private fun GameScreen(
                     Text(text, fontSize = 10.sp, fontFamily = FontFamily.Monospace)
                 }
             },
-            confirmButton = { TextButton(onClick = { logText = null }) { Text("关闭") } }
+            confirmButton = { TextButton(onClick = { logText = null }) { Text("关闭") } },
+            dismissButton = {
+                Row {
+                    TextButton(onClick = {
+                        clipboard?.setPrimaryClip(
+                            ClipData.newPlainText("Node 运行日志", text)
+                        )
+                        Toast.makeText(context, "日志已复制", Toast.LENGTH_SHORT).show()
+                    }) { Text("复制") }
+                    TextButton(onClick = { logExportLauncher.launch(null) }) { Text("导出到文件夹") }
+                }
+            }
         )
     }
 
